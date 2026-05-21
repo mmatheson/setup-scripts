@@ -2,8 +2,16 @@
 set -euo pipefail
 
 WORKSPACE="/workspaces"
+CACHE="/cache"
 ORG="trunk-io"
 REPOS=(trunk trunk2 trunk-cloud analytics-cli)
+
+# --- Create /cache and route heavy caches there ---
+# $HOME is a 5G shared NFS mount across devboxes; the root partition is large
+# and devbox-local, so rustup/cargo/nvm/pnpm-store/trunk all live under /cache.
+sudo mkdir -p "$CACHE"
+sudo chown "$USER:$USER" "$CACHE"
+export XDG_CACHE_HOME="$CACHE"
 
 # --- Install apt packages ---
 APT_PACKAGES=(zsh vim less htop direnv libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf)
@@ -75,43 +83,23 @@ else
   chmod +x "$HOME/.local/bin/jj"
 fi
 
-# --- Install rustup / cargo ---
-# Pin CARGO_HOME / RUSTUP_HOME to user-local paths so a devbox-provided
-# CARGO_HOME (e.g. /cache/.cargo) can't redirect rustup to an ephemeral mount.
-export RUSTUP_HOME="$HOME/.rustup"
-export CARGO_HOME="$HOME/.cargo"
+# --- Install rustup / cargo (caches live on $XDG_CACHE_HOME) ---
+export RUSTUP_HOME="$XDG_CACHE_HOME/.rustup"
+export CARGO_HOME="$XDG_CACHE_HOME/.cargo"
 export PATH="$CARGO_HOME/bin:$PATH"
 if ! command -v rustup >/dev/null 2>&1; then
   echo "→ installing rustup"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 fi
-# Devboxes sometimes ship with rustup present but no toolchain (or the
-# previous toolchain lived on an ephemeral mount that got wiped).
+# Devboxes sometimes ship with rustup present but no toolchain (or the previous
+# toolchain lived on a mount that got wiped).
 if ! rustup default >/dev/null 2>&1; then
   echo "→ installing rust stable toolchain"
   rustup default stable
 fi
-# Strip stale shell-rc lines that source an ephemeral cargo env path.
-for rc in "$HOME/.zshenv" "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
-  if [ -f "$rc" ] && grep -q '/cache/\.cargo/env' "$rc"; then
-    echo "→ removing stale /cache/.cargo/env source line from $rc"
-    sed -i.bak '\|/cache/\.cargo/env|d' "$rc"
-  fi
-done
-
-# --- Configure direnv zsh hook ---
-ZSHRC="$HOME/.zshrc"
-DIRENV_HOOK_LINE='eval "$(direnv hook zsh)"'
-touch "$ZSHRC"
-if ! grep -Fq 'direnv hook zsh' "$ZSHRC"; then
-  echo "→ adding direnv hook to $ZSHRC"
-  printf '\n# direnv\n%s\n' "$DIRENV_HOOK_LINE" >> "$ZSHRC"
-else
-  echo "✓ direnv hook already in $ZSHRC"
-fi
 
 # --- Install nvm + Node LTS ---
-export NVM_DIR="$HOME/.nvm"
+export NVM_DIR="$XDG_CACHE_HOME/.nvm"
 if [ -s "$NVM_DIR/nvm.sh" ]; then
   echo "✓ nvm already installed"
 else
@@ -133,11 +121,12 @@ case ":$PATH:" in
   *":$PNPM_HOME:"*) ;;
   *) export PATH="$PNPM_HOME:$PATH" ;;
 esac
-# Write zsh integration so future interactive shells inherit PNPM_HOME.
 SHELL="$ZSH_PATH" pnpm setup --force >/dev/null || true
 # Belt-and-suspenders: force pnpm's stored global-bin-dir to match PNPM_HOME,
 # in case a prior run recorded a different path.
 pnpm config set global-bin-dir "$PNPM_HOME" >/dev/null
+# Big content-addressed store goes on /cache, not the 5G $HOME mount.
+pnpm config set store-dir "$XDG_CACHE_HOME/pnpm/store" >/dev/null
 pnpm i -g @openai/codex
 
 # --- Install trunk ---
@@ -148,6 +137,110 @@ else
   curl -fsSL https://get.trunk.io | bash -s -- -y
 fi
 
+# --- Install tailscale ---
+if command -v tailscale >/dev/null 2>&1; then
+  echo "✓ tailscale already installed ($(tailscale version | head -n1))"
+else
+  echo "→ installing tailscale"
+  curl -fsSL https://tailscale.com/install.sh | sh
+fi
+# Make sure tailscaled is running before `tailscale up`.
+# Wrap status checks in `timeout` — a wedged daemon socket would hang silently.
+if ! timeout 5 sudo tailscale status >/dev/null 2>&1; then
+  if [ "$(ps -p 1 -o comm=)" = "systemd" ]; then
+    # On hosts without /dev/net/tun (sandboxes, some containers), the default
+    # systemd unit fails because tailscaled can't create a TUN device. Drop a
+    # systemd override forcing userspace networking in that case.
+    if [ ! -e /dev/net/tun ]; then
+      OVERRIDE=/etc/systemd/system/tailscaled.service.d/override.conf
+      # /etc/default/tailscaled (EnvironmentFile) overrides Environment= from
+      # drop-ins, so we replace ExecStart directly instead of setting $FLAGS.
+      if ! grep -Fq "ExecStart=/usr/sbin/tailscaled" "$OVERRIDE" 2>/dev/null; then
+        echo "→ no /dev/net/tun; installing tailscaled override (userspace networking)"
+        sudo mkdir -p "$(dirname "$OVERRIDE")"
+        sudo tee "$OVERRIDE" >/dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=41641 --tun=userspace-networking
+EOF
+        sudo systemctl daemon-reload
+      fi
+    fi
+    echo "→ (re)starting tailscaled via systemd"
+    sudo systemctl stop tailscaled 2>/dev/null || true
+    sudo pkill -x tailscaled 2>/dev/null || true
+    sleep 1
+    sudo systemctl reset-failed tailscaled 2>/dev/null || true
+    sudo systemctl enable tailscaled >/dev/null
+    sudo systemctl start tailscaled
+  elif ! pgrep -x tailscaled >/dev/null 2>&1; then
+    echo "→ starting tailscaled (no systemd; userspace networking)"
+    sudo nohup tailscaled --tun=userspace-networking \
+      >/var/log/tailscaled.log 2>&1 &
+  fi
+  # Wait for the daemon's local API to actually answer — the process can be up
+  # before the backend is ready, which manifests as "503 no backend".
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    timeout 2 sudo tailscale status >/dev/null 2>&1 && break
+    sleep 1
+  done
+  echo "→ bringing tailscale up (follow the printed login URL)"
+  sudo tailscale up
+fi
+
+# --- Configure zsh: env exports + direnv/trunk hooks (managed block) ---
+ZSHRC="$HOME/.zshrc"
+touch "$ZSHRC"
+BEGIN_MARK="# >>> workspace-setup.sh (managed) >>>"
+END_MARK="# <<< workspace-setup.sh (managed) <<<"
+if grep -Fq "$BEGIN_MARK" "$ZSHRC"; then
+  echo "→ refreshing managed block in $ZSHRC"
+  sed -i.bak "\|$BEGIN_MARK|,\|$END_MARK|d" "$ZSHRC"
+else
+  echo "→ adding managed block to $ZSHRC"
+fi
+cat >> "$ZSHRC" <<'EOF'
+# >>> workspace-setup.sh (managed) >>>
+export XDG_CACHE_HOME="/cache"
+export RUSTUP_HOME="$XDG_CACHE_HOME/.rustup"
+export CARGO_HOME="$XDG_CACHE_HOME/.cargo"
+export CODEX_HOME="$XDG_CACHE_HOME/.codex"
+
+export PATH="$HOME/.local/bin:$CARGO_HOME/bin:$PATH"
+[ -s "$CARGO_HOME/env" ] && . "$CARGO_HOME/env"
+
+export NVM_DIR="$XDG_CACHE_HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"
+
+export PNPM_HOME="$HOME/.local/share/pnpm"
+case ":$PATH:" in
+  *":$PNPM_HOME:"*) ;;
+  *) export PATH="$PNPM_HOME:$PATH" ;;
+esac
+
+command -v direnv >/dev/null 2>&1 && eval "$(direnv hook zsh)"
+test -f "$XDG_CACHE_HOME/trunk/shell-hooks/zsh.rc" && source "$XDG_CACHE_HOME/trunk/shell-hooks/zsh.rc"
+
+alias ls="ls -lFa --color"
+alias bb="bazel build"
+alias br="bazel run"
+alias bt="bazel test"
+alias gs="git status"
+alias k="kubectl"
+alias zj='zellij'
+alias za='zellij attach'
+alias zs='zellij session'
+alias zl='zellij list-sessions'
+alias zk='zellij kill-session'
+alias zr='zellij rename-session'
+alias zd='zellij detach'
+alias zq='zellij quit'
+alias zc='zellij connect'
+alias zx='zellij execute'
+# <<< workspace-setup.sh (managed) <<<
+EOF
+
 # --- Create /workspaces and hand it to the current (non-root) user ---
 sudo mkdir -p "$WORKSPACE"
 sudo chown "$USER:$USER" "$WORKSPACE"
@@ -157,11 +250,13 @@ cd "$WORKSPACE"
 # --- Clone repos (idempotent) ---
 for repo in "${REPOS[@]}"; do
   if [ -d "$repo/.git" ]; then
-    echo "✓ $repo already cloned, skipping"
+    echo "✓ $repo already cloned"
   else
     echo "→ cloning $repo"
-    git clone "git@github.com:$ORG/$repo.git"
+    git clone --recurse-submodules "git@github.com:$ORG/$repo.git"
   fi
+  # Always sync submodules — picks up new ones for repos cloned pre-flag.
+  git -C "$repo" submodule update --init --recursive
 done
 
 echo "Done. Repos are in $WORKSPACE. Restart your shell (or log out/in) for zsh and PATH changes to take effect."

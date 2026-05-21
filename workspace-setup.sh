@@ -150,6 +150,17 @@ else
   echo "→ installing trunk"
   curl -fsSL https://get.trunk.io | bash -s -- -y
 fi
+trunk shellhooks install zsh
+
+# --- Install tailscale ---
+if command -v tailscale >/dev/null 2>&1; then
+  echo "✓ tailscale already installed ($(tailscale version | head -n1))"
+else
+  echo "→ installing tailscale"
+  curl -fsSL https://tailscale.com/install.sh | sh
+fi
+sudo systemctl status tailscaled --no-pager
+sudo tailscale up
 
 # --- Configure zsh: env exports + direnv/trunk hooks (managed block) ---
 ZSHRC="$HOME/.zshrc"
@@ -183,7 +194,6 @@ case ":$PATH:" in
 esac
 
 command -v direnv >/dev/null 2>&1 && eval "$(direnv hook zsh)"
-test -f "$XDG_CACHE_HOME/trunk/shell-hooks/zsh.rc" && source "$XDG_CACHE_HOME/trunk/shell-hooks/zsh.rc"
 
 alias ls="ls -lFa --color"
 alias bb="bazel build"

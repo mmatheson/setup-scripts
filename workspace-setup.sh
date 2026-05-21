@@ -99,6 +99,17 @@ for rc in "$HOME/.zshenv" "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
   fi
 done
 
+# --- Configure direnv zsh hook ---
+ZSHRC="$HOME/.zshrc"
+DIRENV_HOOK_LINE='eval "$(direnv hook zsh)"'
+touch "$ZSHRC"
+if ! grep -Fq 'direnv hook zsh' "$ZSHRC"; then
+  echo "→ adding direnv hook to $ZSHRC"
+  printf '\n# direnv\n%s\n' "$DIRENV_HOOK_LINE" >> "$ZSHRC"
+else
+  echo "✓ direnv hook already in $ZSHRC"
+fi
+
 # --- Install nvm + Node LTS ---
 export NVM_DIR="$HOME/.nvm"
 if [ -s "$NVM_DIR/nvm.sh" ]; then

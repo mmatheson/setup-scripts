@@ -89,7 +89,18 @@ export CARGO_HOME="$XDG_CACHE_HOME/.cargo"
 export PATH="$CARGO_HOME/bin:$PATH"
 if ! command -v rustup >/dev/null 2>&1; then
   echo "→ installing rustup"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+  # --no-modify-path: don't touch .zshenv/.profile; the managed block in .zshrc
+  # owns PATH and sources $CARGO_HOME/env (which lives on /cache, not $HOME).
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain stable
+fi
+# Older runs (before --no-modify-path) left a `. "$HOME/.cargo/env"` line in
+# .zshenv; that path doesn't exist when CARGO_HOME=/cache/.cargo, so new shells
+# error on startup. Strip any cargo-env sourcing — the managed .zshrc block
+# handles it.
+if [ -f "$HOME/.zshenv" ] && grep -q '\.cargo/env' "$HOME/.zshenv"; then
+  echo "→ removing stale cargo env sourcing from ~/.zshenv"
+  sed -i.bak '/\.cargo\/env/d' "$HOME/.zshenv"
+  [ -s "$HOME/.zshenv" ] || rm -f "$HOME/.zshenv"
 fi
 # Devboxes sometimes ship with rustup present but no toolchain (or the previous
 # toolchain lived on a mount that got wiped).
@@ -112,6 +123,9 @@ fi
 nvm install --lts
 
 # --- Enable pnpm via corepack and install global tools ---
+# Corepack downloads pnpm on first use and prompts interactively unless this
+# is set; we want unattended runs.
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 corepack enable
 # Pin PNPM_HOME and add it to PATH BEFORE invoking pnpm, so pnpm's internal
 # "is global-bin-dir on PATH" check sees a consistent env on every run.
@@ -135,57 +149,6 @@ if command -v trunk >/dev/null 2>&1; then
 else
   echo "→ installing trunk"
   curl -fsSL https://get.trunk.io | bash -s -- -y
-fi
-
-# --- Install tailscale ---
-if command -v tailscale >/dev/null 2>&1; then
-  echo "✓ tailscale already installed ($(tailscale version | head -n1))"
-else
-  echo "→ installing tailscale"
-  curl -fsSL https://tailscale.com/install.sh | sh
-fi
-# Make sure tailscaled is running before `tailscale up`.
-# Wrap status checks in `timeout` — a wedged daemon socket would hang silently.
-if ! timeout 5 sudo tailscale status >/dev/null 2>&1; then
-  if [ "$(ps -p 1 -o comm=)" = "systemd" ]; then
-    # On hosts without /dev/net/tun (sandboxes, some containers), the default
-    # systemd unit fails because tailscaled can't create a TUN device. Drop a
-    # systemd override forcing userspace networking in that case.
-    if [ ! -e /dev/net/tun ]; then
-      OVERRIDE=/etc/systemd/system/tailscaled.service.d/override.conf
-      # /etc/default/tailscaled (EnvironmentFile) overrides Environment= from
-      # drop-ins, so we replace ExecStart directly instead of setting $FLAGS.
-      if ! grep -Fq "ExecStart=/usr/sbin/tailscaled" "$OVERRIDE" 2>/dev/null; then
-        echo "→ no /dev/net/tun; installing tailscaled override (userspace networking)"
-        sudo mkdir -p "$(dirname "$OVERRIDE")"
-        sudo tee "$OVERRIDE" >/dev/null <<'EOF'
-[Service]
-ExecStart=
-ExecStart=/usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=41641 --tun=userspace-networking
-EOF
-        sudo systemctl daemon-reload
-      fi
-    fi
-    echo "→ (re)starting tailscaled via systemd"
-    sudo systemctl stop tailscaled 2>/dev/null || true
-    sudo pkill -x tailscaled 2>/dev/null || true
-    sleep 1
-    sudo systemctl reset-failed tailscaled 2>/dev/null || true
-    sudo systemctl enable tailscaled >/dev/null
-    sudo systemctl start tailscaled
-  elif ! pgrep -x tailscaled >/dev/null 2>&1; then
-    echo "→ starting tailscaled (no systemd; userspace networking)"
-    sudo nohup tailscaled --tun=userspace-networking \
-      >/var/log/tailscaled.log 2>&1 &
-  fi
-  # Wait for the daemon's local API to actually answer — the process can be up
-  # before the backend is ready, which manifests as "503 no backend".
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    timeout 2 sudo tailscale status >/dev/null 2>&1 && break
-    sleep 1
-  done
-  echo "→ bringing tailscale up (follow the printed login URL)"
-  sudo tailscale up
 fi
 
 # --- Configure zsh: env exports + direnv/trunk hooks (managed block) ---

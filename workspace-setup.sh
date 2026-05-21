@@ -76,12 +76,28 @@ else
 fi
 
 # --- Install rustup / cargo ---
-if command -v rustup >/dev/null 2>&1; then
-  echo "✓ rustup already installed"
-else
+# Pin CARGO_HOME / RUSTUP_HOME to user-local paths so a devbox-provided
+# CARGO_HOME (e.g. /cache/.cargo) can't redirect rustup to an ephemeral mount.
+export RUSTUP_HOME="$HOME/.rustup"
+export CARGO_HOME="$HOME/.cargo"
+export PATH="$CARGO_HOME/bin:$PATH"
+if ! command -v rustup >/dev/null 2>&1; then
   echo "→ installing rustup"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 fi
+# Devboxes sometimes ship with rustup present but no toolchain (or the
+# previous toolchain lived on an ephemeral mount that got wiped).
+if ! rustup default >/dev/null 2>&1; then
+  echo "→ installing rust stable toolchain"
+  rustup default stable
+fi
+# Strip stale shell-rc lines that source an ephemeral cargo env path.
+for rc in "$HOME/.zshenv" "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+  if [ -f "$rc" ] && grep -q '/cache/\.cargo/env' "$rc"; then
+    echo "→ removing stale /cache/.cargo/env source line from $rc"
+    sed -i.bak '\|/cache/\.cargo/env|d' "$rc"
+  fi
+done
 
 # --- Install nvm + Node LTS ---
 export NVM_DIR="$HOME/.nvm"
@@ -98,10 +114,19 @@ nvm install --lts
 
 # --- Enable pnpm via corepack and install global tools ---
 corepack enable
-# Run pnpm setup as if from zsh so it writes to ~/.zshrc
-SHELL="$ZSH_PATH" pnpm setup --force >/dev/null || true
+# Pin PNPM_HOME and add it to PATH BEFORE invoking pnpm, so pnpm's internal
+# "is global-bin-dir on PATH" check sees a consistent env on every run.
 export PNPM_HOME="$HOME/.local/share/pnpm"
-export PATH="$PNPM_HOME:$PATH"
+mkdir -p "$PNPM_HOME"
+case ":$PATH:" in
+  *":$PNPM_HOME:"*) ;;
+  *) export PATH="$PNPM_HOME:$PATH" ;;
+esac
+# Write zsh integration so future interactive shells inherit PNPM_HOME.
+SHELL="$ZSH_PATH" pnpm setup --force >/dev/null || true
+# Belt-and-suspenders: force pnpm's stored global-bin-dir to match PNPM_HOME,
+# in case a prior run recorded a different path.
+pnpm config set global-bin-dir "$PNPM_HOME" >/dev/null
 pnpm i -g @openai/codex
 
 # --- Install trunk ---

@@ -225,8 +225,8 @@ for repo in "${REPOS[@]}"; do
   if [ -d "$repo/.git" ]; then
     echo "✓ $repo already cloned"
   else
-    echo "→ cloning $repo"
-    git clone --recurse-submodules "git@github.com:$ORG/$repo.git"
+    echo "→ cloning $repo (shallow, last month of history)"
+    git clone --recurse-submodules --shallow-submodules --shallow-since="1 month ago" "git@github.com:$ORG/$repo.git"
   fi
   # Always sync submodules — picks up new ones for repos cloned pre-flag.
   git -C "$repo" submodule update --init --recursive

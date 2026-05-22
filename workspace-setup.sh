@@ -159,7 +159,7 @@ else
   echo "→ installing tailscale"
   curl -fsSL https://tailscale.com/install.sh | sh
 fi
-sudo systemctl status tailscaled --no-pager
+sudo systemctl restart tailscaled
 sudo tailscale up
 
 # --- Configure zsh: env exports + direnv/trunk hooks (managed block) ---

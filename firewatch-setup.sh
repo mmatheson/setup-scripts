@@ -87,6 +87,25 @@ fi
 export RUSTUP_HOME="$XDG_CACHE_HOME/.rustup"
 export CARGO_HOME="$XDG_CACHE_HOME/.cargo"
 export PATH="$CARGO_HOME/bin:$PATH"
+# Belt-and-suspenders: symlink ~/.rustup and ~/.cargo onto /cache. The env
+# vars above route rustup/cargo correctly in this shell and any interactive
+# zsh (via the managed .zshrc block), but non-interactive shells — one-shot
+# ssh, IDE subprocesses, Make rules invoking /bin/sh, build agents — don't
+# source .zshrc and fall back to $HOME. A single nightly toolchain is enough
+# to blow the 5G $HOME quota (os error 122).
+mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+for spec in "$HOME/.rustup:$RUSTUP_HOME" "$HOME/.cargo:$CARGO_HOME"; do
+  link="${spec%%:*}"
+  target="${spec##*:}"
+  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
+    continue
+  fi
+  if [ -e "$link" ] || [ -L "$link" ]; then
+    echo "→ replacing $link with symlink → $target"
+    rm -rf "$link"
+  fi
+  ln -snf "$target" "$link"
+done
 if ! command -v rustup >/dev/null 2>&1; then
   echo "→ installing rustup"
   # --no-modify-path: don't touch .zshenv/.profile; the managed block in .zshrc
@@ -142,6 +161,8 @@ pnpm config set global-bin-dir "$PNPM_HOME" >/dev/null
 # Big content-addressed store goes on /cache, not the 5G $HOME mount.
 pnpm config set store-dir "$XDG_CACHE_HOME/pnpm/store" >/dev/null
 pnpm i -g @openai/codex
+# Codex refuses to start if CODEX_HOME is set to a missing dir.
+mkdir -p "$XDG_CACHE_HOME/.codex"
 
 # --- Install trunk ---
 if command -v trunk >/dev/null 2>&1; then

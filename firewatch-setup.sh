@@ -164,6 +164,14 @@ pnpm i -g @openai/codex
 # Codex refuses to start if CODEX_HOME is set to a missing dir.
 mkdir -p "$XDG_CACHE_HOME/.codex"
 
+# --- Install cursor CLI (cursor-agent, installs to ~/.local/bin) ---
+if command -v cursor-agent >/dev/null 2>&1; then
+  echo "✓ cursor-agent already installed ($(cursor-agent --version 2>/dev/null | head -n1))"
+else
+  echo "→ installing cursor-agent"
+  curl https://cursor.com/install -fsS | bash
+fi
+
 # --- Install trunk ---
 if command -v trunk >/dev/null 2>&1; then
   echo "✓ trunk already installed"
@@ -181,7 +189,25 @@ else
   curl -fsSL https://tailscale.com/install.sh | sh
 fi
 sudo systemctl restart tailscaled
-sudo tailscale up
+# `tailscale up` is skipped by default (the node is usually already authed).
+# Set TAILSCALE_UP=1 to bring the node up as part of setup.
+if [ -n "${TAILSCALE_UP:-}" ]; then
+  sudo tailscale up
+else
+  echo "✓ skipping 'tailscale up' (set TAILSCALE_UP=1 to run it)"
+fi
+
+# --- Install nix (Determinate Systems installer, unattended) ---
+# Multi-user daemon install; needs systemd, which devboxes have (see tailscale).
+# The installer writes /etc/profile.d/nix*.sh and the daemon profile under
+# /nix/var/nix/profiles/default — the managed .zshrc block sources the latter.
+if command -v nix >/dev/null 2>&1 || [ -e /nix/var/nix/profiles/default/bin/nix ]; then
+  echo "✓ nix already installed"
+else
+  echo "→ installing nix"
+  curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
+    | sh -s -- install --no-confirm
+fi
 
 # --- Configure zsh: env exports + direnv/trunk hooks (managed block) ---
 ZSHRC="$HOME/.zshrc"
@@ -213,6 +239,9 @@ case ":$PATH:" in
   *":$PNPM_HOME:"*) ;;
   *) export PATH="$PNPM_HOME:$PATH" ;;
 esac
+
+# nix daemon profile (multi-user install) — puts nix on PATH for interactive zsh
+[ -s "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh" ] && . "/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh"
 
 command -v direnv >/dev/null 2>&1 && eval "$(direnv hook zsh)"
 

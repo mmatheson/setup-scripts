@@ -128,6 +128,31 @@ if ! rustup default >/dev/null 2>&1; then
   rustup default stable
 fi
 
+# --- Route Go caches onto /cache ---
+# Go's defaults all land on the 5G $HOME mount: GOPATH=~/go (which holds the
+# module cache pkg/mod and `go install`ed binaries) and GOCACHE=~/.cache/go-build.
+# A single big build is enough to blow the quota, so point them at /cache. Same
+# belt-and-suspenders symlink as rustup/cargo: env vars cover this shell and the
+# managed .zshrc block, the ~/go symlink covers non-interactive shells that
+# don't source .zshrc (one-shot ssh, IDE subprocesses, /bin/sh make rules).
+export GOPATH="$XDG_CACHE_HOME/go"
+export GOCACHE="$XDG_CACHE_HOME/go-build"
+export GOMODCACHE="$GOPATH/pkg/mod"
+export PATH="$GOPATH/bin:$PATH"
+mkdir -p "$GOPATH" "$GOCACHE"
+# Migrate anything already sitting in ~/go onto /cache, then replace it with a
+# symlink. cp -an won't clobber files already on /cache from a prior run.
+if [ -d "$HOME/go" ] && [ ! -L "$HOME/go" ]; then
+  echo "→ migrating existing ~/go into $GOPATH"
+  cp -an "$HOME/go/." "$GOPATH/" 2>/dev/null || true
+  rm -rf "$HOME/go"
+fi
+if [ ! -L "$HOME/go" ] || [ "$(readlink "$HOME/go")" != "$GOPATH" ]; then
+  echo "→ symlinking ~/go → $GOPATH"
+  rm -rf "$HOME/go"
+  ln -snf "$GOPATH" "$HOME/go"
+fi
+
 # --- Install nvm + Node LTS ---
 export NVM_DIR="$XDG_CACHE_HOME/.nvm"
 if [ -s "$NVM_DIR/nvm.sh" ]; then
@@ -163,6 +188,39 @@ pnpm config set store-dir "$XDG_CACHE_HOME/pnpm/store" >/dev/null
 pnpm i -g @openai/codex
 # Codex refuses to start if CODEX_HOME is set to a missing dir.
 mkdir -p "$XDG_CACHE_HOME/.codex"
+
+# --- Route npm's cache onto /cache ---
+# npm/npx download into ~/.npm/_cacache by default — easily 1G+ on the 5G $HOME
+# mount. NPM_CONFIG_CACHE (mirrored in the managed .zshrc block) relocates it;
+# migrate + symlink so non-interactive shells and one-shot npx follow too.
+export NPM_CONFIG_CACHE="$XDG_CACHE_HOME/npm"
+mkdir -p "$NPM_CONFIG_CACHE"
+if [ -d "$HOME/.npm" ] && [ ! -L "$HOME/.npm" ]; then
+  echo "→ migrating existing ~/.npm into $NPM_CONFIG_CACHE"
+  cp -an "$HOME/.npm/." "$NPM_CONFIG_CACHE/" 2>/dev/null || true
+  rm -rf "$HOME/.npm"
+fi
+if [ ! -L "$HOME/.npm" ] || [ "$(readlink "$HOME/.npm")" != "$NPM_CONFIG_CACHE" ]; then
+  echo "→ symlinking ~/.npm → $NPM_CONFIG_CACHE"
+  rm -rf "$HOME/.npm"
+  ln -snf "$NPM_CONFIG_CACHE" "$HOME/.npm"
+fi
+
+# --- Route Pulumi onto /cache ---
+# ~/.pulumi/plugins holds downloaded provider plugins (hundreds of MB). PULUMI_HOME
+# relocates the whole dir; migrate + symlink so the env var isn't strictly required.
+export PULUMI_HOME="$XDG_CACHE_HOME/pulumi"
+mkdir -p "$PULUMI_HOME"
+if [ -d "$HOME/.pulumi" ] && [ ! -L "$HOME/.pulumi" ]; then
+  echo "→ migrating existing ~/.pulumi into $PULUMI_HOME"
+  cp -an "$HOME/.pulumi/." "$PULUMI_HOME/" 2>/dev/null || true
+  rm -rf "$HOME/.pulumi"
+fi
+if [ ! -L "$HOME/.pulumi" ] || [ "$(readlink "$HOME/.pulumi")" != "$PULUMI_HOME" ]; then
+  echo "→ symlinking ~/.pulumi → $PULUMI_HOME"
+  rm -rf "$HOME/.pulumi"
+  ln -snf "$PULUMI_HOME" "$HOME/.pulumi"
+fi
 
 # --- Install cursor CLI (cursor-agent, installs to ~/.local/bin) ---
 if command -v cursor-agent >/dev/null 2>&1; then
@@ -209,6 +267,28 @@ else
     | sh -s -- install --no-confirm
 fi
 
+# --- Configure ~/.zshenv: env that must be set BEFORE .zshrc (managed block) ---
+# zsh sources .zshenv for every invocation (interactive or not) before .zshrc.
+# ZSH_COMPDUMP must be pinned here: oh-my-zsh (sourced from .zshrc) otherwise
+# derives the dump filename from $SHORT_HOST, which on these devboxes is a
+# per-session randomized sandbox hostname — so every new shell drops a fresh
+# ~/.zcompdump-<host>-<ver> (+ .zwc) pair and they pile up indefinitely. A
+# fixed path on /cache means one reusable dump and nothing landing in $HOME.
+ZSHENV="$HOME/.zshenv"
+touch "$ZSHENV"
+ENV_BEGIN="# >>> workspace-setup.sh env (managed) >>>"
+ENV_END="# <<< workspace-setup.sh env (managed) <<<"
+if grep -Fq "$ENV_BEGIN" "$ZSHENV"; then
+  sed -i.bak "\|$ENV_BEGIN|,\|$ENV_END|d" "$ZSHENV"
+fi
+mkdir -p "$XDG_CACHE_HOME/zsh"
+cat >> "$ZSHENV" <<'EOF'
+# >>> workspace-setup.sh env (managed) >>>
+export XDG_CACHE_HOME="/cache"
+export ZSH_COMPDUMP="$XDG_CACHE_HOME/zsh/zcompdump"
+# <<< workspace-setup.sh env (managed) <<<
+EOF
+
 # --- Configure zsh: env exports + direnv/trunk hooks (managed block) ---
 ZSHRC="$HOME/.zshrc"
 touch "$ZSHRC"
@@ -226,9 +306,16 @@ export XDG_CACHE_HOME="/cache"
 export RUSTUP_HOME="$XDG_CACHE_HOME/.rustup"
 export CARGO_HOME="$XDG_CACHE_HOME/.cargo"
 export CODEX_HOME="$XDG_CACHE_HOME/.codex"
+export NPM_CONFIG_CACHE="$XDG_CACHE_HOME/npm"
+export PULUMI_HOME="$XDG_CACHE_HOME/pulumi"
 
 export PATH="$HOME/.local/bin:$CARGO_HOME/bin:$PATH"
 [ -s "$CARGO_HOME/env" ] && . "$CARGO_HOME/env"
+
+export GOPATH="$XDG_CACHE_HOME/go"
+export GOCACHE="$XDG_CACHE_HOME/go-build"
+export GOMODCACHE="$GOPATH/pkg/mod"
+export PATH="$GOPATH/bin:$PATH"
 
 export NVM_DIR="$XDG_CACHE_HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"

@@ -46,8 +46,46 @@ if ! git config --global user.email >/dev/null 2>&1; then
   git config --global user.email "matt@trunk.io"
 fi
 
-# --- Ensure ~/.local/bin exists ---
+# --- Ensure ~/.local/bin exists and is on PATH for this run ---
+# jj/claude/cursor-agent install here; without this, the `command -v`
+# idempotency checks miss on re-runs from a fresh shell and reinstall.
 mkdir -p "$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
+
+# --- Relocate hardcoded-$HOME dirs onto /cache (migrate + symlink) ---
+# Many tools ignore XDG_CACHE_HOME and write straight into $HOME. For each:
+# copy anything already there onto /cache (cp -an, no clobber), remove the
+# original, and leave a symlink so every future write lands on /cache —
+# including from non-interactive shells that never source .zshrc.
+relocate_to_cache() {
+  local link="$1" target="$2"
+  mkdir -p "$target" "$(dirname "$link")"
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    echo "→ migrating $link into $target"
+    cp -an "$link/." "$target/" 2>/dev/null || true
+    rm -rf "$link"
+  fi
+  if [ ! -L "$link" ] || [ "$(readlink "$link")" != "$target" ]; then
+    echo "→ symlinking $link → $target"
+    rm -rf "$link"
+    ln -snf "$target" "$link"
+  fi
+}
+
+# ~/.cache: XDG_CACHE_HOME points at /cache, but plenty of tools hardcode
+# ~/.cache anyway (trunk, prisma engine downloads). Symlinking the whole dir
+# catches them all.
+relocate_to_cache "$HOME/.cache" "$CACHE"
+# ~/.config/sst: SST hoards provider plugins plus bundled bun/pulumi binaries
+# (1.4G+ observed) and has no env var to relocate them.
+relocate_to_cache "$HOME/.config/sst" "$CACHE/sst"
+# ~/.cursor-server: each remote-server build under cli/servers is ~370M and
+# old ones linger after client updates.
+relocate_to_cache "$HOME/.cursor-server" "$CACHE/cursor-server"
+# Claude Code / cursor-agent native installers keep each downloaded version
+# (~200M apiece) under ~/.local/share.
+relocate_to_cache "$HOME/.local/share/claude" "$CACHE/local/share/claude"
+relocate_to_cache "$HOME/.local/share/cursor-agent" "$CACHE/local/share/cursor-agent"
 
 # --- Install zellij (prebuilt musl binary from GitHub releases) ---
 if command -v zellij >/dev/null 2>&1; then
@@ -93,19 +131,8 @@ export PATH="$CARGO_HOME/bin:$PATH"
 # ssh, IDE subprocesses, Make rules invoking /bin/sh, build agents — don't
 # source .zshrc and fall back to $HOME. A single nightly toolchain is enough
 # to blow the 5G $HOME quota (os error 122).
-mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
-for spec in "$HOME/.rustup:$RUSTUP_HOME" "$HOME/.cargo:$CARGO_HOME"; do
-  link="${spec%%:*}"
-  target="${spec##*:}"
-  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
-    continue
-  fi
-  if [ -e "$link" ] || [ -L "$link" ]; then
-    echo "→ replacing $link with symlink → $target"
-    rm -rf "$link"
-  fi
-  ln -snf "$target" "$link"
-done
+relocate_to_cache "$HOME/.rustup" "$RUSTUP_HOME"
+relocate_to_cache "$HOME/.cargo" "$CARGO_HOME"
 if ! command -v rustup >/dev/null 2>&1; then
   echo "→ installing rustup"
   # --no-modify-path: don't touch .zshenv/.profile; the managed block in .zshrc
@@ -139,19 +166,8 @@ export GOPATH="$XDG_CACHE_HOME/go"
 export GOCACHE="$XDG_CACHE_HOME/go-build"
 export GOMODCACHE="$GOPATH/pkg/mod"
 export PATH="$GOPATH/bin:$PATH"
-mkdir -p "$GOPATH" "$GOCACHE"
-# Migrate anything already sitting in ~/go onto /cache, then replace it with a
-# symlink. cp -an won't clobber files already on /cache from a prior run.
-if [ -d "$HOME/go" ] && [ ! -L "$HOME/go" ]; then
-  echo "→ migrating existing ~/go into $GOPATH"
-  cp -an "$HOME/go/." "$GOPATH/" 2>/dev/null || true
-  rm -rf "$HOME/go"
-fi
-if [ ! -L "$HOME/go" ] || [ "$(readlink "$HOME/go")" != "$GOPATH" ]; then
-  echo "→ symlinking ~/go → $GOPATH"
-  rm -rf "$HOME/go"
-  ln -snf "$GOPATH" "$HOME/go"
-fi
+mkdir -p "$GOCACHE"
+relocate_to_cache "$HOME/go" "$GOPATH"
 
 # --- Install nvm + Node LTS ---
 export NVM_DIR="$XDG_CACHE_HOME/.nvm"
@@ -194,32 +210,23 @@ mkdir -p "$XDG_CACHE_HOME/.codex"
 # mount. NPM_CONFIG_CACHE (mirrored in the managed .zshrc block) relocates it;
 # migrate + symlink so non-interactive shells and one-shot npx follow too.
 export NPM_CONFIG_CACHE="$XDG_CACHE_HOME/npm"
-mkdir -p "$NPM_CONFIG_CACHE"
-if [ -d "$HOME/.npm" ] && [ ! -L "$HOME/.npm" ]; then
-  echo "→ migrating existing ~/.npm into $NPM_CONFIG_CACHE"
-  cp -an "$HOME/.npm/." "$NPM_CONFIG_CACHE/" 2>/dev/null || true
-  rm -rf "$HOME/.npm"
-fi
-if [ ! -L "$HOME/.npm" ] || [ "$(readlink "$HOME/.npm")" != "$NPM_CONFIG_CACHE" ]; then
-  echo "→ symlinking ~/.npm → $NPM_CONFIG_CACHE"
-  rm -rf "$HOME/.npm"
-  ln -snf "$NPM_CONFIG_CACHE" "$HOME/.npm"
-fi
+relocate_to_cache "$HOME/.npm" "$NPM_CONFIG_CACHE"
 
 # --- Route Pulumi onto /cache ---
 # ~/.pulumi/plugins holds downloaded provider plugins (hundreds of MB). PULUMI_HOME
 # relocates the whole dir; migrate + symlink so the env var isn't strictly required.
 export PULUMI_HOME="$XDG_CACHE_HOME/pulumi"
-mkdir -p "$PULUMI_HOME"
-if [ -d "$HOME/.pulumi" ] && [ ! -L "$HOME/.pulumi" ]; then
-  echo "→ migrating existing ~/.pulumi into $PULUMI_HOME"
-  cp -an "$HOME/.pulumi/." "$PULUMI_HOME/" 2>/dev/null || true
-  rm -rf "$HOME/.pulumi"
-fi
-if [ ! -L "$HOME/.pulumi" ] || [ "$(readlink "$HOME/.pulumi")" != "$PULUMI_HOME" ]; then
-  echo "→ symlinking ~/.pulumi → $PULUMI_HOME"
-  rm -rf "$HOME/.pulumi"
-  ln -snf "$PULUMI_HOME" "$HOME/.pulumi"
+relocate_to_cache "$HOME/.pulumi" "$PULUMI_HOME"
+
+# --- Install Claude Code (native installer, installs to ~/.local/bin) ---
+# Versions land under ~/.local/share/claude, which is symlinked onto /cache
+# above. The installer's checksum check is occasionally flaky, so retry once.
+if command -v claude >/dev/null 2>&1; then
+  echo "✓ claude already installed ($(claude --version 2>/dev/null | head -n1))"
+else
+  echo "→ installing claude code"
+  curl -fsSL https://claude.ai/install.sh | bash \
+    || { echo "→ claude install failed, retrying"; curl -fsSL https://claude.ai/install.sh | bash; }
 fi
 
 # --- Install cursor CLI (cursor-agent, installs to ~/.local/bin) ---

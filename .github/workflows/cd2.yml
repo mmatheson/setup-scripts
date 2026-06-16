@@ -1,74 +1,71 @@
 name: capture-diag2
-
 on: workflow_dispatch
 
 jobs:
   capture:
-    runs-on: ubuntu-latest   # the hosted-runner common case
+    runs-on: ubuntu-latest
     steps:
-      - name: Start _diag snapshotter
-        # Runs in the background for the whole job, copying page files as they
-        # appear (the runner deletes them after upload) and logging the dir over
-        # time. Survives into later steps (same VM).
+      - name: Start snapshotter (robust _diag discovery)
         run: |
-          OUT="$RUNNER_TEMP/diag-capture"
-          mkdir -p "$OUT/pages"
+          OUT="$RUNNER_TEMP/diag-capture"; mkdir -p "$OUT/pages"
           cat > "$RUNNER_TEMP/snap.sh" <<'EOF'
           OUT="$RUNNER_TEMP/diag-capture"
-          while true; do
-            DIAG=$(ls -d /home/runner/runners/*/_diag 2>/dev/null | head -1)
-            if [ -n "$DIAG" ] && [ -d "$DIAG/pages" ]; then
-              { date +%s.%N; ls -la --full-time "$DIAG/pages" 2>/dev/null; echo; } >> "$OUT/pages-listing.log"
-              for f in "$DIAG"/pages/*; do
-                [ -e "$f" ] || continue
-                b=$(basename "$f")
-                [ -e "$OUT/pages/$b" ] || cp "$f" "$OUT/pages/$b" 2>/dev/null
+          find_diag() {
+            # Locate _diag via the running Runner.Worker/Listener (walk up from cwd/exe)…
+            for pid in $(pgrep -f 'Runner\.(Worker|Listener)' 2>/dev/null); do
+              for base in "$(readlink -f /proc/$pid/cwd 2>/dev/null)" "$(dirname "$(readlink -f /proc/$pid/exe 2>/dev/null)")"; do
+                d="$base"
+                for _ in 1 2 3 4 5; do
+                  [ -d "$d/_diag" ] && { echo "$d/_diag"; return; }
+                  d="$(dirname "$d")"
+                done
               done
+            done
+            # …or a broad filesystem search as fallback.
+            find /home /opt /usr /var /actions-runner -maxdepth 6 -type d -name _diag 2>/dev/null | head -1
+          }
+          while true; do
+            DIAG="$(find_diag)"
+            if [ -n "$DIAG" ] && [ -d "$DIAG" ]; then
+              echo "$DIAG" > "$OUT/diag-path.txt"
+              { date +%s.%N; ls -la --full-time "$DIAG/pages" 2>&1; echo; } >> "$OUT/pages-listing.log"
+              for f in "$DIAG"/pages/*; do [ -e "$f" ] || continue; b=$(basename "$f"); [ -e "$OUT/pages/$b" ] || cp "$f" "$OUT/pages/$b" 2>/dev/null; done
             fi
             sleep 0.2
           done
           EOF
           nohup bash "$RUNNER_TEMP/snap.sh" >/dev/null 2>&1 &
-          echo "snapshotter pid $!"
+          echo "pid $!"
 
-      - name: Probe correlation contexts
+      - name: work step Build
         run: |
-          OUT="$RUNNER_TEMP/diag-capture"; mkdir -p "$OUT"
-          # Does ${{ job.check_run_id }} actually resolve? (R2 — action-mode path)
-          echo "job.check_run_id = '${{ job.check_run_id }}'"            >  "$OUT/contexts.txt"
-          echo "github.run_id = '${{ github.run_id }}'"                  >> "$OUT/contexts.txt"
-          echo "github.run_attempt = '${{ github.run_attempt }}'"        >> "$OUT/contexts.txt"
-          echo "github.job = '${{ github.job }}'"                        >> "$OUT/contexts.txt"
-          echo "github.repository = '${{ github.repository }}'"          >> "$OUT/contexts.txt"
-          echo '--- toJSON(job) ---'                                     >> "$OUT/contexts.txt"
-          cat <<'JOB' >> "$OUT/contexts.txt"
-          ${{ toJSON(job) }}
-          JOB
-
-      - name: Sample step output (info / warning / error / group)
-        run: |
-          echo "plain info line"
-          echo "::group::Compiling widgets"
-          echo "compiling..."
+          echo "::group::Build"
+          echo "building widgets"
+          echo "::warning::sample warning"
           echo "::endgroup::"
-          echo "::warning::a sample warning"
-          echo "::error::a sample error"
 
-      - name: Another named step
-        run: echo "second step output, to test step↔page attribution"
+      - name: work step Test
+        run: |
+          echo "running tests"
+          echo "::error::sample error"
 
-      - name: Collect artifact
+      - name: Collect
         if: always()
         run: |
           OUT="$RUNNER_TEMP/diag-capture"
-          DIAG=$(ls -d /home/runner/runners/*/_diag 2>/dev/null | head -1)
+          ps -ef | grep -i runner | grep -v grep > "$OUT/ps.txt" 2>/dev/null || true
+          for pid in $(pgrep -f 'Runner\.(Worker|Listener)' 2>/dev/null); do
+            echo "pid=$pid cwd=$(readlink -f /proc/$pid/cwd 2>/dev/null) exe=$(readlink -f /proc/$pid/exe 2>/dev/null)" >> "$OUT/procs.txt"
+          done
+          find / -name 'Worker_*.log' 2>/dev/null > "$OUT/worker-logs-found.txt" || true
+          find / -maxdepth 8 -type d -name _diag 2>/dev/null > "$OUT/diag-dirs-found.txt" || true
+          DIAG="$(cat "$OUT/diag-path.txt" 2>/dev/null)"
           echo "DIAG=$DIAG" > "$OUT/meta.txt"
-          (cd "$(dirname "$DIAG")" && cat .runner 2>/dev/null) >> "$OUT/meta.txt" || true
-          ls -laR "$DIAG" > "$OUT/diag-tree.txt" 2>/dev/null || true
-          # Worker log carries the job message (step list, GUIDs, contextData).
-          cp "$DIAG"/Worker_*.log "$OUT/" 2>/dev/null || true
-          cp "$DIAG"/Runner_*.log "$OUT/" 2>/dev/null || true
-          # Env minus obvious secrets (for /proc-env correlation questions).
+          if [ -n "$DIAG" ]; then
+            ls -laR "$DIAG" > "$OUT/diag-tree.txt" 2>&1 || true
+            cp "$DIAG"/Worker_*.log "$OUT/" 2>/dev/null || true
+            cp "$DIAG"/Runner_*.log "$OUT/" 2>/dev/null || true
+          fi
           env | grep -viE 'TOKEN|SECRET|KEY|PASSWORD|AUTH' | sort > "$OUT/env-filtered.txt"
           pkill -f snap.sh || true
           tar czf "$RUNNER_TEMP/diag-capture.tgz" -C "$RUNNER_TEMP" diag-capture

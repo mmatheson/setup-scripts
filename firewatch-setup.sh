@@ -237,6 +237,18 @@ else
   curl https://cursor.com/install -fsS | bash
 fi
 
+# --- Install pi.dev ---
+if command -v pi >/dev/null 2>&1; then
+  echo "✓ pi already installed ($(pi --version 2>/dev/null | head -n1))"
+else
+  echo "→ installing pi"
+  # The installer has no --yes flag; it goes interactive whenever it can open
+  # /dev/tty (true even under `curl | sh`). Run it under setsid so it has no
+  # controlling terminal — it then auto-installs without prompting, picking the
+  # npm global prefix (or ~/.local) on its own.
+  curl -fsSL https://pi.dev/install.sh | setsid sh
+fi
+
 # --- Install trunk ---
 if command -v trunk >/dev/null 2>&1; then
   echo "✓ trunk already installed"
@@ -252,6 +264,52 @@ if command -v tailscale >/dev/null 2>&1; then
 else
   echo "→ installing tailscale"
   curl -fsSL https://tailscale.com/install.sh | sh
+fi
+# On distros tailscale's installer doesn't recognize, it drops the static
+# binaries (into /usr/local/sbin) but never installs a systemd unit — so
+# `systemctl restart tailscaled` fails with "Unit tailscaled.service not found".
+# Install the unit ourselves when it's missing, pointing at wherever tailscaled
+# actually landed.
+if ! systemctl list-unit-files tailscaled.service >/dev/null 2>&1 \
+   || ! systemctl cat tailscaled.service >/dev/null 2>&1; then
+  echo "→ installing tailscaled systemd unit"
+  TAILSCALED_BIN="$(command -v tailscaled || echo /usr/local/sbin/tailscaled)"
+  if [ ! -f /etc/default/tailscaled ]; then
+    sudo tee /etc/default/tailscaled >/dev/null <<'EOF'
+# Set the port to listen on for incoming VPN packets.
+PORT="41641"
+# Extra flags you might want to pass to tailscaled.
+FLAGS=""
+EOF
+  fi
+  sudo tee /etc/systemd/system/tailscaled.service >/dev/null <<EOF
+[Unit]
+Description=Tailscale node agent
+Documentation=https://tailscale.com/kb/
+Wants=network-pre.target
+After=network-pre.target NetworkManager.service systemd-resolved.service
+
+[Service]
+EnvironmentFile=/etc/default/tailscaled
+ExecStartPre=$TAILSCALED_BIN --cleanup
+ExecStart=$TAILSCALED_BIN --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=\${PORT} \$FLAGS
+ExecStopPost=$TAILSCALED_BIN --cleanup
+
+Restart=on-failure
+
+RuntimeDirectory=tailscale
+RuntimeDirectoryMode=0755
+StateDirectory=tailscale
+StateDirectoryMode=0700
+CacheDirectory=tailscale
+CacheDirectoryMode=0750
+Type=notify
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl enable tailscaled
 fi
 sudo systemctl restart tailscaled
 # `tailscale up` is skipped by default (the node is usually already authed).

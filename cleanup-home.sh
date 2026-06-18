@@ -15,6 +15,12 @@ set -euo pipefail
 DRY_RUN="${DRY_RUN:-}"
 KEEP_DAYS="${KEEP_DAYS:-14}"   # age threshold for version/cache pruning
 
+# Validate KEEP_DAYS is a positive integer to prevent command injection via find.
+if ! [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || [ "$KEEP_DAYS" -eq 0 ]; then
+  echo "ERROR: KEEP_DAYS must be a positive integer, got '$KEEP_DAYS'" >&2
+  exit 1
+fi
+
 rm_path() {
   # rm_path <path> — honors DRY_RUN, reports size reclaimed.
   local p="$1"

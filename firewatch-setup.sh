@@ -225,8 +225,8 @@ if command -v claude >/dev/null 2>&1; then
   echo "✓ claude already installed ($(claude --version 2>/dev/null | head -n1))"
 else
   echo "→ installing claude code"
-  curl -fsSL https://claude.ai/install.sh | bash \
-    || { echo "→ claude install failed, retrying"; curl -fsSL https://claude.ai/install.sh | bash; }
+  curl --proto '=https' --tlsv1.2 -fsSL https://claude.ai/install.sh | bash \
+    || { echo "→ claude install failed, retrying"; curl --proto '=https' --tlsv1.2 -fsSL https://claude.ai/install.sh | bash; }
 fi
 
 # --- Install cursor CLI (cursor-agent, installs to ~/.local/bin) ---
@@ -234,7 +234,7 @@ if command -v cursor-agent >/dev/null 2>&1; then
   echo "✓ cursor-agent already installed ($(cursor-agent --version 2>/dev/null | head -n1))"
 else
   echo "→ installing cursor-agent"
-  curl https://cursor.com/install -fsS | bash
+  curl --proto '=https' --tlsv1.2 -fsSL https://cursor.com/install | bash
 fi
 
 # --- Install pi.dev ---
@@ -246,7 +246,7 @@ else
   # /dev/tty (true even under `curl | sh`). Run it under setsid so it has no
   # controlling terminal — it then auto-installs without prompting, picking the
   # npm global prefix (or ~/.local) on its own.
-  curl -fsSL https://pi.dev/install.sh | setsid sh
+  curl --proto '=https' --tlsv1.2 -fsSL https://pi.dev/install.sh | setsid sh
 fi
 
 # --- Install trunk ---
@@ -254,7 +254,7 @@ if command -v trunk >/dev/null 2>&1; then
   echo "✓ trunk already installed"
 else
   echo "→ installing trunk"
-  curl -fsSL https://get.trunk.io | bash -s -- -y
+  curl --proto '=https' --tlsv1.2 -fsSL https://get.trunk.io | bash -s -- -y
 fi
 trunk shellhooks install zsh
 
@@ -263,7 +263,7 @@ if command -v tailscale >/dev/null 2>&1; then
   echo "✓ tailscale already installed ($(tailscale version | head -n1))"
 else
   echo "→ installing tailscale"
-  curl -fsSL https://tailscale.com/install.sh | sh
+  curl --proto '=https' --tlsv1.2 -fsSL https://tailscale.com/install.sh | sh
 fi
 # On distros tailscale's installer doesn't recognize, it drops the static
 # binaries (into /usr/local/sbin) but never installs a systemd unit — so

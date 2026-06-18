@@ -1,80 +1,82 @@
 name: capture-diag
-  on: workflow_dispatch
+on: workflow_dispatch
 
-  jobs:
-    capture:
-      runs-on: ubuntu-latest   # the hosted-runner common case
-      steps:
-        - name: Start _diag snapshotter
-          # Runs in the background for the whole job, copying page files as they
-          # appear (the runner deletes them after upload) and logging the dir over
-          # time. Survives into later steps (same VM).
-          run: |
-            OUT="$RUNNER_TEMP/diag-capture"
-            mkdir -p "$OUT/pages"
-            cat > "$RUNNER_TEMP/snap.sh" <<'EOF'
-            OUT="$RUNNER_TEMP/diag-capture"
-            while true; do
-              DIAG=$(ls -d /home/runner/runners/*/_diag 2>/dev/null | head -1)
-              if [ -n "$DIAG" ] && [ -d "$DIAG/pages" ]; then
-                { date +%s.%N; ls -la --full-time "$DIAG/pages" 2>/dev/null; echo; } >> "$OUT/pages-listing.log"
-                for f in "$DIAG"/pages/*; do
-                  [ -e "$f" ] || continue
-                  b=$(basename "$f")
-                  [ -e "$OUT/pages/$b" ] || cp "$f" "$OUT/pages/$b" 2>/dev/null
-                done
-              fi
-              sleep 0.2
-            done
-            EOF
-            nohup bash "$RUNNER_TEMP/snap.sh" >/dev/null 2>&1 &
-            echo "snapshotter pid $!"
+permissions: {}
 
-        - name: Probe correlation contexts
-          run: |
-            OUT="$RUNNER_TEMP/diag-capture"; mkdir -p "$OUT"
-            # Does ${{ job.check_run_id }} actually resolve? (R2 — action-mode path)
-            echo "job.check_run_id = '${{ job.check_run_id }}'"            >  "$OUT/contexts.txt"
-            echo "github.run_id = '${{ github.run_id }}'"                  >> "$OUT/contexts.txt"
-            echo "github.run_attempt = '${{ github.run_attempt }}'"        >> "$OUT/contexts.txt"
-            echo "github.job = '${{ github.job }}'"                        >> "$OUT/contexts.txt"
-            echo "github.repository = '${{ github.repository }}'"          >> "$OUT/contexts.txt"
-            echo '--- toJSON(job) ---'                                     >> "$OUT/contexts.txt"
-            cat <<'JOB' >> "$OUT/contexts.txt"
-            ${{ toJSON(job) }}
-            JOB
-
-        - name: Sample step output (info / warning / error / group)
-          run: |
-            echo "plain info line"
-            echo "::group::Compiling widgets"
-            echo "compiling..."
-            echo "::endgroup::"
-            echo "::warning::a sample warning"
-            echo "::error::a sample error"
-
-        - name: Another named step
-          run: echo "second step output, to test step↔page attribution"
-
-        - name: Collect artifact
-          if: always()
-          run: |
-            OUT="$RUNNER_TEMP/diag-capture"
+jobs:
+  capture:
+    runs-on: ubuntu-latest # the hosted-runner common case
+    steps:
+      - name: Start _diag snapshotter
+        # Runs in the background for the whole job, copying page files as they
+        # appear (the runner deletes them after upload) and logging the dir over
+        # time. Survives into later steps (same VM).
+        run: |
+          OUT="$RUNNER_TEMP/diag-capture"
+          mkdir -p "$OUT/pages"
+          cat > "$RUNNER_TEMP/snap.sh" <<'EOF'
+          OUT="$RUNNER_TEMP/diag-capture"
+          while true; do
             DIAG=$(ls -d /home/runner/runners/*/_diag 2>/dev/null | head -1)
-            echo "DIAG=$DIAG" > "$OUT/meta.txt"
-            (cd "$(dirname "$DIAG")" && cat .runner 2>/dev/null) >> "$OUT/meta.txt" || true
-            ls -laR "$DIAG" > "$OUT/diag-tree.txt" 2>/dev/null || true
-            # Worker log carries the job message (step list, GUIDs, contextData).
-            cp "$DIAG"/Worker_*.log "$OUT/" 2>/dev/null || true
-            cp "$DIAG"/Runner_*.log "$OUT/" 2>/dev/null || true
-            # Env minus obvious secrets (for /proc-env correlation questions).
-            env | grep -viE 'TOKEN|SECRET|KEY|PASSWORD|AUTH' | sort > "$OUT/env-filtered.txt"
-            pkill -f snap.sh || true
-            tar czf "$RUNNER_TEMP/diag-capture.tgz" -C "$RUNNER_TEMP" diag-capture
+            if [ -n "$DIAG" ] && [ -d "$DIAG/pages" ]; then
+              { date +%s.%N; ls -la --full-time "$DIAG/pages" 2>/dev/null; echo; } >> "$OUT/pages-listing.log"
+              for f in "$DIAG"/pages/*; do
+                [ -e "$f" ] || continue
+                b=$(basename "$f")
+                [ -e "$OUT/pages/$b" ] || cp "$f" "$OUT/pages/$b" 2>/dev/null
+              done
+            fi
+            sleep 0.2
+          done
+          EOF
+          nohup bash "$RUNNER_TEMP/snap.sh" >/dev/null 2>&1 &
+          echo "snapshotter pid $!"
 
-        - uses: actions/upload-artifact@v4
-          if: always()
-          with:
-            name: diag-capture
-            path: ${{ runner.temp }}/diag-capture.tgz
-            retention-days: 1
+      - name: Probe correlation contexts
+        run: |
+          OUT="$RUNNER_TEMP/diag-capture"; mkdir -p "$OUT"
+          # Does ${{ job.check_run_id }} actually resolve? (R2 — action-mode path)
+          echo "job.check_run_id = '${{ job.check_run_id }}'"            >  "$OUT/contexts.txt"
+          echo "github.run_id = '${{ github.run_id }}'"                  >> "$OUT/contexts.txt"
+          echo "github.run_attempt = '${{ github.run_attempt }}'"        >> "$OUT/contexts.txt"
+          echo "github.job = '${{ github.job }}'"                        >> "$OUT/contexts.txt"
+          echo "github.repository = '${{ github.repository }}'"          >> "$OUT/contexts.txt"
+          echo '--- toJSON(job) ---'                                     >> "$OUT/contexts.txt"
+          cat <<'JOB' >> "$OUT/contexts.txt"
+          ${{ toJSON(job) }}
+          JOB
+
+      - name: Sample step output (info / warning / error / group)
+        run: |
+          echo "plain info line"
+          echo "::group::Compiling widgets"
+          echo "compiling..."
+          echo "::endgroup::"
+          echo "::warning::a sample warning"
+          echo "::error::a sample error"
+
+      - name: Another named step
+        run: echo "second step output, to test step↔page attribution"
+
+      - name: Collect artifact
+        if: always()
+        run: |
+          OUT="$RUNNER_TEMP/diag-capture"
+          DIAG=$(ls -d /home/runner/runners/*/_diag 2>/dev/null | head -1)
+          echo "DIAG=$DIAG" > "$OUT/meta.txt"
+          (cd "$(dirname "$DIAG")" && cat .runner 2>/dev/null) >> "$OUT/meta.txt" || true
+          ls -laR "$DIAG" > "$OUT/diag-tree.txt" 2>/dev/null || true
+          # Worker log carries the job message (step list, GUIDs, contextData).
+          cp "$DIAG"/Worker_*.log "$OUT/" 2>/dev/null || true
+          cp "$DIAG"/Runner_*.log "$OUT/" 2>/dev/null || true
+          # Env minus obvious secrets (for /proc-env correlation questions).
+          env | grep -viE 'TOKEN|SECRET|KEY|PASSWORD|AUTH' | sort > "$OUT/env-filtered.txt"
+          pkill -f snap.sh || true
+          tar czf "$RUNNER_TEMP/diag-capture.tgz" -C "$RUNNER_TEMP" diag-capture
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diag-capture
+          path: ${{ runner.temp }}/diag-capture.tgz
+          retention-days: 1

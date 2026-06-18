@@ -130,6 +130,7 @@ fi
 # --- 6. npm cache that escaped relocation -----------------------------------
 # After firewatch-setup.sh, ~/.npm is a symlink to /cache. If it's still a real
 # directory (setup not yet re-run), prune the download cache to reclaim now.
+# shellcheck disable=SC2016
 echo '→ npm cache on $HOME'
 if [ -d "$HOME/.npm" ] && [ ! -L "$HOME/.npm" ]; then
 	rm_path "$HOME/.npm/_cacache"
@@ -150,6 +151,7 @@ echo "→ Claude session transcripts older than ${KEEP_DAYS}d"
 prune_old_files "$HOME/.claude/projects" '*.jsonl'
 
 # --- 8. Editor / shell backup crumbs ----------------------------------------
+# shellcheck disable=SC2016
 echo '→ *.bak / *.swp backup files in $HOME'
 for f in "$HOME"/.*.bak "$HOME"/.*.swp; do
 	[ -e "$f" ] && rm_path "$f"

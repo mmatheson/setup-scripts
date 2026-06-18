@@ -66,7 +66,7 @@ jobs:
             cp "$DIAG"/Worker_*.log "$OUT/" 2>/dev/null || true
             cp "$DIAG"/Runner_*.log "$OUT/" 2>/dev/null || true
           fi
-          env | grep -viE 'TOKEN|SECRET|KEY|PASSWORD|AUTH' | sort > "$OUT/env-filtered.txt"
+          env | grep -viE 'TOKEN|SECRET|KEY|PASSWORD|AUTH|CREDENTIAL|PRIVATE|PAT|JWT|CERT|SIGNING' | sort > "$OUT/env-filtered.txt"
           pkill -f snap.sh || true
           tar czf "$RUNNER_TEMP/diag-capture.tgz" -C "$RUNNER_TEMP" diag-capture
 

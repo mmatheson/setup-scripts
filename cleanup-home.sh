@@ -15,38 +15,9 @@ set -euo pipefail
 DRY_RUN="${DRY_RUN:-}"
 KEEP_DAYS="${KEEP_DAYS:-14}"   # age threshold for version/cache pruning
 
-rm_path() {
-  # rm_path <path> — honors DRY_RUN, reports size reclaimed.
-  local p="$1"
-  [ -e "$p" ] || [ -L "$p" ] || return 0
-  local sz
-  sz="$(du -sh "$p" 2>/dev/null | cut -f1)"
-  if [ -n "$DRY_RUN" ]; then
-    echo "  would remove $p ($sz)"
-  else
-    echo "  removing $p ($sz)"
-    rm -rf "$p"
-  fi
-}
-
-prune_old_files() {
-  # prune_old_files <dir> <name-glob> — remove files older than KEEP_DAYS,
-  # reported as one summary line instead of one line per file.
-  local dir="$1" glob="$2"
-  [ -d "$dir" ] || return 0
-  local files count sz
-  files="$(find "$dir" -name "$glob" -type f -mtime "+$KEEP_DAYS" 2>/dev/null)"
-  [ -n "$files" ] || return 0
-  count="$(printf '%s\n' "$files" | wc -l)"
-  sz="$(printf '%s\n' "$files" | xargs -d '\n' du -ch 2>/dev/null | tail -n1 | cut -f1)"
-  if [ -n "$DRY_RUN" ]; then
-    echo "  would remove $count files from $dir ($sz)"
-  else
-    echo "  removing $count files from $dir ($sz)"
-    printf '%s\n' "$files" | xargs -d '\n' rm -f
-    find "$dir" -mindepth 1 -type d -empty -delete 2>/dev/null || true
-  fi
-}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
 
 before="$(du -sm "$HOME" 2>/dev/null | cut -f1)"
 echo "=== $HOME is ${before}M before cleanup ==="
@@ -63,21 +34,11 @@ done
 # --- 2. Old Claude Code versions --------------------------------------------
 # The native auto-updater keeps every version it ever downloaded (~240M each).
 echo "→ old Claude Code versions (keeping newest)"
-CLAUDE_VERS="$HOME/.local/share/claude/versions"
-if [ -d "$CLAUDE_VERS" ]; then
-  ls -1 "$CLAUDE_VERS" 2>/dev/null | sort -V | head -n -1 | while read -r v; do
-    rm_path "$CLAUDE_VERS/$v"
-  done
-fi
+prune_old_versions "$HOME/.local/share/claude/versions"
 
 # --- 3. Old cursor-agent versions -------------------------------------------
 echo "→ old cursor-agent versions (keeping newest)"
-CURSOR_VERS="$HOME/.local/share/cursor-agent/versions"
-if [ -d "$CURSOR_VERS" ]; then
-  ls -1 "$CURSOR_VERS" 2>/dev/null | sort -V | head -n -1 | while read -r v; do
-    rm_path "$CURSOR_VERS/$v"
-  done
-fi
+prune_old_versions "$HOME/.local/share/cursor-agent/versions"
 
 # --- 4. Stale Cursor/VS Code remote server binaries -------------------------
 # Each server build gets its own ~370M dir (cli/servers/Stable-<commit> on
@@ -103,28 +64,16 @@ fi
 # demand if nothing has touched them in KEEP_DAYS.
 if [ -d "$HOME/.cache" ] && [ ! -L "$HOME/.cache" ]; then
   echo "→ stale caches under ~/.cache (trunk, prisma)"
-  for c in "$HOME/.cache/trunk" "$HOME/.cache/prisma"; do
-    [ -d "$c" ] || continue
-    if [ -z "$(find "$c" -type f -mtime "-$KEEP_DAYS" -print -quit 2>/dev/null)" ]; then
-      rm_path "$c"
-    else
-      echo "  skipping $c — has files newer than ${KEEP_DAYS}d (may still be in use)"
-    fi
-  done
+  prune_stale_dir_if_real "$HOME/.cache/trunk" "may still be in use"
+  prune_stale_dir_if_real "$HOME/.cache/prisma" "may still be in use"
 fi
 
 # --- 5b. ~/.config/sst (only while it still lives on $HOME) ------------------
 # SST's provider plugins + bundled binaries run 1.4G+; firewatch-setup.sh now
 # symlinks the dir onto /cache. Until then, sweep it if idle — sst re-downloads
 # what it needs on the next run.
-if [ -d "$HOME/.config/sst" ] && [ ! -L "$HOME/.config/sst" ]; then
-  echo "→ stale ~/.config/sst"
-  if [ -z "$(find "$HOME/.config/sst" -type f -mtime "-$KEEP_DAYS" -print -quit 2>/dev/null)" ]; then
-    rm_path "$HOME/.config/sst"
-  else
-    echo "  skipping — has files newer than ${KEEP_DAYS}d (re-run firewatch-setup.sh to relocate it)"
-  fi
-fi
+echo "→ stale ~/.config/sst"
+prune_stale_dir_if_real "$HOME/.config/sst" "re-run firewatch-setup.sh to relocate it"
 
 # --- 6. npm cache that escaped relocation -----------------------------------
 # After firewatch-setup.sh, ~/.npm is a symlink to /cache. If it's still a real

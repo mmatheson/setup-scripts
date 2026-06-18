@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
+
 WORKSPACE="/workspaces"
 CACHE="/cache"
 ORG="trunk-io"
@@ -57,20 +61,7 @@ export PATH="$HOME/.local/bin:$PATH"
 # copy anything already there onto /cache (cp -an, no clobber), remove the
 # original, and leave a symlink so every future write lands on /cache —
 # including from non-interactive shells that never source .zshrc.
-relocate_to_cache() {
-  local link="$1" target="$2"
-  mkdir -p "$target" "$(dirname "$link")"
-  if [ -e "$link" ] && [ ! -L "$link" ]; then
-    echo "→ migrating $link into $target"
-    cp -an "$link/." "$target/" 2>/dev/null || true
-    rm -rf "$link"
-  fi
-  if [ ! -L "$link" ] || [ "$(readlink "$link")" != "$target" ]; then
-    echo "→ symlinking $link → $target"
-    rm -rf "$link"
-    ln -snf "$target" "$link"
-  fi
-}
+# (relocate_to_cache is provided by lib/common.sh)
 
 # ~/.cache: XDG_CACHE_HOME points at /cache, but plenty of tools hardcode
 # ~/.cache anyway (trunk, prisma engine downloads). Symlinking the whole dir
@@ -88,38 +79,15 @@ relocate_to_cache "$HOME/.local/share/claude" "$CACHE/local/share/claude"
 relocate_to_cache "$HOME/.local/share/cursor-agent" "$CACHE/local/share/cursor-agent"
 
 # --- Install zellij (prebuilt musl binary from GitHub releases) ---
-if command -v zellij >/dev/null 2>&1; then
-  echo "✓ zellij already installed ($(zellij --version))"
-else
-  echo "→ installing zellij"
-  case "$(uname -m)" in
-    x86_64)  ZJ_ARCH="x86_64-unknown-linux-musl" ;;
-    aarch64|arm64) ZJ_ARCH="aarch64-unknown-linux-musl" ;;
-    *) echo "Unsupported arch $(uname -m) for zellij" >&2; exit 1 ;;
-  esac
-  ZJ_URL="https://github.com/zellij-org/zellij/releases/latest/download/zellij-${ZJ_ARCH}.tar.gz"
-  TMP="$(mktemp -d)"
-  curl -fsSL "$ZJ_URL" -o "$TMP/zellij.tar.gz"
-  tar -xzf "$TMP/zellij.tar.gz" -C "$TMP"
-  sudo install -m 755 "$TMP/zellij" /usr/local/bin/zellij
-  rm -rf "$TMP"
-fi
+install_github_release zellij zellij \
+  "https://github.com/zellij-org/zellij/releases/latest/download/zellij-ARCH.tar.gz" \
+  sh -c 'tar -xzf dl.tar.gz && sudo install -m 755 zellij /usr/local/bin/zellij'
 
 # --- Install jj (prebuilt musl binary from GitHub releases) ---
-if command -v jj >/dev/null 2>&1; then
-  echo "✓ jj already installed ($(jj --version))"
-else
-  echo "→ installing jj"
-  case "$(uname -m)" in
-    x86_64) JJ_ARCH="x86_64-unknown-linux-musl" ;;
-    aarch64|arm64) JJ_ARCH="aarch64-unknown-linux-musl" ;;
-    *) echo "Unsupported arch $(uname -m) for jj" >&2; exit 1 ;;
-  esac
-  JJ_VERSION="v0.41.0"
-  curl -fsSL "https://github.com/jj-vcs/jj/releases/download/${JJ_VERSION}/jj-${JJ_VERSION}-${JJ_ARCH}.tar.gz" \
-    | tar -xz -C "$HOME/.local/bin" ./jj
-  chmod +x "$HOME/.local/bin/jj"
-fi
+JJ_VERSION="v0.41.0"
+install_github_release jj jj \
+  "https://github.com/jj-vcs/jj/releases/download/${JJ_VERSION}/jj-${JJ_VERSION}-ARCH.tar.gz" \
+  sh -c "tar -xzf dl.tar.gz ./jj && install -m 755 jj $HOME/.local/bin/jj"
 
 # --- Install rustup / cargo (caches live on $XDG_CACHE_HOME) ---
 export RUSTUP_HOME="$XDG_CACHE_HOME/.rustup"
@@ -221,50 +189,29 @@ relocate_to_cache "$HOME/.pulumi" "$PULUMI_HOME"
 # --- Install Claude Code (native installer, installs to ~/.local/bin) ---
 # Versions land under ~/.local/share/claude, which is symlinked onto /cache
 # above. The installer's checksum check is occasionally flaky, so retry once.
-if command -v claude >/dev/null 2>&1; then
-  echo "✓ claude already installed ($(claude --version 2>/dev/null | head -n1))"
-else
-  echo "→ installing claude code"
-  curl -fsSL https://claude.ai/install.sh | bash \
-    || { echo "→ claude install failed, retrying"; curl -fsSL https://claude.ai/install.sh | bash; }
-fi
+ensure_cmd claude "claude code" \
+  sh -c 'curl -fsSL https://claude.ai/install.sh | bash || { echo "→ claude install failed, retrying"; curl -fsSL https://claude.ai/install.sh | bash; }'
 
 # --- Install cursor CLI (cursor-agent, installs to ~/.local/bin) ---
-if command -v cursor-agent >/dev/null 2>&1; then
-  echo "✓ cursor-agent already installed ($(cursor-agent --version 2>/dev/null | head -n1))"
-else
-  echo "→ installing cursor-agent"
-  curl https://cursor.com/install -fsS | bash
-fi
+ensure_cmd cursor-agent cursor-agent \
+  sh -c 'curl https://cursor.com/install -fsS | bash'
 
 # --- Install pi.dev ---
-if command -v pi >/dev/null 2>&1; then
-  echo "✓ pi already installed ($(pi --version 2>/dev/null | head -n1))"
-else
-  echo "→ installing pi"
-  # The installer has no --yes flag; it goes interactive whenever it can open
-  # /dev/tty (true even under `curl | sh`). Run it under setsid so it has no
-  # controlling terminal — it then auto-installs without prompting, picking the
-  # npm global prefix (or ~/.local) on its own.
-  curl -fsSL https://pi.dev/install.sh | setsid sh
-fi
+# The installer has no --yes flag; it goes interactive whenever it can open
+# /dev/tty (true even under `curl | sh`). Run it under setsid so it has no
+# controlling terminal — it then auto-installs without prompting, picking the
+# npm global prefix (or ~/.local) on its own.
+ensure_cmd pi pi \
+  sh -c 'curl -fsSL https://pi.dev/install.sh | setsid sh'
 
 # --- Install trunk ---
-if command -v trunk >/dev/null 2>&1; then
-  echo "✓ trunk already installed"
-else
-  echo "→ installing trunk"
-  curl -fsSL https://get.trunk.io | bash -s -- -y
-fi
+ensure_cmd trunk trunk \
+  sh -c 'curl -fsSL https://get.trunk.io | bash -s -- -y'
 trunk shellhooks install zsh
 
 # --- Install tailscale ---
-if command -v tailscale >/dev/null 2>&1; then
-  echo "✓ tailscale already installed ($(tailscale version | head -n1))"
-else
-  echo "→ installing tailscale"
-  curl -fsSL https://tailscale.com/install.sh | sh
-fi
+ensure_cmd tailscale tailscale \
+  sh -c 'curl -fsSL https://tailscale.com/install.sh | sh'
 # On distros tailscale's installer doesn't recognize, it drops the static
 # binaries (into /usr/local/sbin) but never installs a systemd unit — so
 # `systemctl restart tailscaled` fails with "Unit tailscaled.service not found".
@@ -324,12 +271,12 @@ fi
 # Multi-user daemon install; needs systemd, which devboxes have (see tailscale).
 # The installer writes /etc/profile.d/nix*.sh and the daemon profile under
 # /nix/var/nix/profiles/default — the managed .zshrc block sources the latter.
-if command -v nix >/dev/null 2>&1 || [ -e /nix/var/nix/profiles/default/bin/nix ]; then
-  echo "✓ nix already installed"
-else
+if ! command -v nix >/dev/null 2>&1 && [ ! -e /nix/var/nix/profiles/default/bin/nix ]; then
   echo "→ installing nix"
   curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
     | sh -s -- install --no-confirm
+else
+  echo "✓ nix already installed"
 fi
 
 # --- Configure ~/.zshenv: env that must be set BEFORE .zshrc (managed block) ---
@@ -339,35 +286,15 @@ fi
 # per-session randomized sandbox hostname — so every new shell drops a fresh
 # ~/.zcompdump-<host>-<ver> (+ .zwc) pair and they pile up indefinitely. A
 # fixed path on /cache means one reusable dump and nothing landing in $HOME.
-ZSHENV="$HOME/.zshenv"
-touch "$ZSHENV"
-ENV_BEGIN="# >>> workspace-setup.sh env (managed) >>>"
-ENV_END="# <<< workspace-setup.sh env (managed) <<<"
-if grep -Fq "$ENV_BEGIN" "$ZSHENV"; then
-  sed -i.bak "\|$ENV_BEGIN|,\|$ENV_END|d" "$ZSHENV"
-fi
 mkdir -p "$XDG_CACHE_HOME/zsh"
-cat >> "$ZSHENV" <<'EOF'
-# >>> workspace-setup.sh env (managed) >>>
-export XDG_CACHE_HOME="/cache"
-export ZSH_COMPDUMP="$XDG_CACHE_HOME/zsh/zcompdump"
-# <<< workspace-setup.sh env (managed) <<<
-EOF
+upsert_managed_block "$HOME/.zshenv" \
+  "# >>> workspace-setup.sh env (managed) >>>" \
+  "# <<< workspace-setup.sh env (managed) <<<" \
+  'export XDG_CACHE_HOME="/cache"
+export ZSH_COMPDUMP="$XDG_CACHE_HOME/zsh/zcompdump"'
 
 # --- Configure zsh: env exports + direnv/trunk hooks (managed block) ---
-ZSHRC="$HOME/.zshrc"
-touch "$ZSHRC"
-BEGIN_MARK="# >>> workspace-setup.sh (managed) >>>"
-END_MARK="# <<< workspace-setup.sh (managed) <<<"
-if grep -Fq "$BEGIN_MARK" "$ZSHRC"; then
-  echo "→ refreshing managed block in $ZSHRC"
-  sed -i.bak "\|$BEGIN_MARK|,\|$END_MARK|d" "$ZSHRC"
-else
-  echo "→ adding managed block to $ZSHRC"
-fi
-cat >> "$ZSHRC" <<'EOF'
-# >>> workspace-setup.sh (managed) >>>
-export XDG_CACHE_HOME="/cache"
+ZSHRC_BLOCK='export XDG_CACHE_HOME="/cache"
 export RUSTUP_HOME="$XDG_CACHE_HOME/.rustup"
 export CARGO_HOME="$XDG_CACHE_HOME/.cargo"
 export CODEX_HOME="$XDG_CACHE_HOME/.codex"
@@ -403,18 +330,20 @@ alias br="bazel run"
 alias bt="bazel test"
 alias gs="git status"
 alias k="kubectl"
-alias zj='zellij'
-alias za='zellij attach'
-alias zs='zellij session'
-alias zl='zellij list-sessions'
-alias zk='zellij kill-session'
-alias zr='zellij rename-session'
-alias zd='zellij detach'
-alias zq='zellij quit'
-alias zc='zellij connect'
-alias zx='zellij execute'
-# <<< workspace-setup.sh (managed) <<<
-EOF
+alias zj='\''zellij'\''
+alias za='\''zellij attach'\''
+alias zs='\''zellij session'\''
+alias zl='\''zellij list-sessions'\''
+alias zk='\''zellij kill-session'\''
+alias zr='\''zellij rename-session'\''
+alias zd='\''zellij detach'\''
+alias zq='\''zellij quit'\''
+alias zc='\''zellij connect'\''
+alias zx='\''zellij execute'\'''
+upsert_managed_block "$HOME/.zshrc" \
+  "# >>> workspace-setup.sh (managed) >>>" \
+  "# <<< workspace-setup.sh (managed) <<<" \
+  "$ZSHRC_BLOCK"
 
 # --- Create /workspaces and hand it to the current (non-root) user ---
 sudo mkdir -p "$WORKSPACE"

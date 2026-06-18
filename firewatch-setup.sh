@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'echo "ERROR: command failed at line $LINENO (exit code $?)" >&2' ERR
 
 WORKSPACE="/workspaces"
 CACHE="/cache"
@@ -17,33 +18,33 @@ export XDG_CACHE_HOME="$CACHE"
 APT_PACKAGES=(zsh vim less htop direnv libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf)
 MISSING_APT=()
 for pkg in "${APT_PACKAGES[@]}"; do
-  if ! dpkg -s "$pkg" >/dev/null 2>&1; then
-    MISSING_APT+=("$pkg")
-  fi
+	if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+		MISSING_APT+=("$pkg")
+	fi
 done
 if [ ${#MISSING_APT[@]} -gt 0 ]; then
-  echo "→ installing apt packages: ${MISSING_APT[*]}"
-  sudo apt-get update
-  sudo apt-get install -y "${MISSING_APT[@]}"
+	echo "→ installing apt packages: ${MISSING_APT[*]}"
+	sudo apt-get update
+	sudo apt-get install -y "${MISSING_APT[@]}"
 else
-  echo "✓ apt packages already installed"
+	echo "✓ apt packages already installed"
 fi
 
 # --- Set zsh as the default login shell ---
 ZSH_PATH="$(command -v zsh)"
 if [ "$SHELL" != "$ZSH_PATH" ]; then
-  echo "→ setting zsh as default shell for $USER"
-  sudo chsh -s "$ZSH_PATH" "$USER"
+	echo "→ setting zsh as default shell for $USER"
+	sudo chsh -s "$ZSH_PATH" "$USER"
 fi
 
 # --- Configure git ---
 if ! git config --global user.name >/dev/null 2>&1; then
-  echo "→ setting git user.name"
-  git config --global user.name "Matt Matheson"
+	echo "→ setting git user.name"
+	git config --global user.name "Matt Matheson"
 fi
 if ! git config --global user.email >/dev/null 2>&1; then
-  echo "→ setting git user.email"
-  git config --global user.email "matt@trunk.io"
+	echo "→ setting git user.email"
+	git config --global user.email "matt@trunk.io"
 fi
 
 # --- Ensure ~/.local/bin exists and is on PATH for this run ---
@@ -58,18 +59,27 @@ export PATH="$HOME/.local/bin:$PATH"
 # original, and leave a symlink so every future write lands on /cache —
 # including from non-interactive shells that never source .zshrc.
 relocate_to_cache() {
-  local link="$1" target="$2"
-  mkdir -p "$target" "$(dirname "$link")"
-  if [ -e "$link" ] && [ ! -L "$link" ]; then
-    echo "→ migrating $link into $target"
-    cp -an "$link/." "$target/" 2>/dev/null || true
-    rm -rf "$link"
-  fi
-  if [ ! -L "$link" ] || [ "$(readlink "$link")" != "$target" ]; then
-    echo "→ symlinking $link → $target"
-    rm -rf "$link"
-    ln -snf "$target" "$link"
-  fi
+	local link="$1" target="$2"
+	mkdir -p "$target" "$(dirname "$link")"
+	if [ -e "$link" ] && [ ! -L "$link" ]; then
+		echo "→ migrating $link into $target"
+		# cp -an may exit non-zero on newer coreutils when no-clobber skips
+		# files; tolerate that, but verify data landed before removing source.
+		cp -an "$link/." "$target/" 2>/dev/null || true
+		local link_contents target_contents
+		link_contents="$(ls -A "${link}" 2>/dev/null)" || true
+		target_contents="$(ls -A "${target}" 2>/dev/null)" || true
+		if [[ -n ${link_contents} ]] && [[ -z ${target_contents} ]]; then
+			echo "ERROR: failed to migrate ${link} → ${target}; refusing to remove source" >&2
+			return 1
+		fi
+		rm -rf "$link"
+	fi
+	if [ ! -L "$link" ] || [ "$(readlink "$link")" != "$target" ]; then
+		echo "→ symlinking $link → $target"
+		rm -rf "$link"
+		ln -snf "$target" "$link"
+	fi
 }
 
 # ~/.cache: XDG_CACHE_HOME points at /cache, but plenty of tools hardcode
@@ -89,36 +99,42 @@ relocate_to_cache "$HOME/.local/share/cursor-agent" "$CACHE/local/share/cursor-a
 
 # --- Install zellij (prebuilt musl binary from GitHub releases) ---
 if command -v zellij >/dev/null 2>&1; then
-  echo "✓ zellij already installed ($(zellij --version))"
+	echo "✓ zellij already installed ($(zellij --version))"
 else
-  echo "→ installing zellij"
-  case "$(uname -m)" in
-    x86_64)  ZJ_ARCH="x86_64-unknown-linux-musl" ;;
-    aarch64|arm64) ZJ_ARCH="aarch64-unknown-linux-musl" ;;
-    *) echo "Unsupported arch $(uname -m) for zellij" >&2; exit 1 ;;
-  esac
-  ZJ_URL="https://github.com/zellij-org/zellij/releases/latest/download/zellij-${ZJ_ARCH}.tar.gz"
-  TMP="$(mktemp -d)"
-  curl -fsSL "$ZJ_URL" -o "$TMP/zellij.tar.gz"
-  tar -xzf "$TMP/zellij.tar.gz" -C "$TMP"
-  sudo install -m 755 "$TMP/zellij" /usr/local/bin/zellij
-  rm -rf "$TMP"
+	echo "→ installing zellij"
+	case "$(uname -m)" in
+	x86_64) ZJ_ARCH="x86_64-unknown-linux-musl" ;;
+	aarch64 | arm64) ZJ_ARCH="aarch64-unknown-linux-musl" ;;
+	*)
+		echo "Unsupported arch $(uname -m) for zellij" >&2
+		exit 1
+		;;
+	esac
+	ZJ_URL="https://github.com/zellij-org/zellij/releases/latest/download/zellij-${ZJ_ARCH}.tar.gz"
+	TMP="$(mktemp -d)"
+	curl -fsSL "$ZJ_URL" -o "$TMP/zellij.tar.gz"
+	tar -xzf "$TMP/zellij.tar.gz" -C "$TMP"
+	sudo install -m 755 "$TMP/zellij" /usr/local/bin/zellij
+	rm -rf "$TMP"
 fi
 
 # --- Install jj (prebuilt musl binary from GitHub releases) ---
 if command -v jj >/dev/null 2>&1; then
-  echo "✓ jj already installed ($(jj --version))"
+	echo "✓ jj already installed ($(jj --version))"
 else
-  echo "→ installing jj"
-  case "$(uname -m)" in
-    x86_64) JJ_ARCH="x86_64-unknown-linux-musl" ;;
-    aarch64|arm64) JJ_ARCH="aarch64-unknown-linux-musl" ;;
-    *) echo "Unsupported arch $(uname -m) for jj" >&2; exit 1 ;;
-  esac
-  JJ_VERSION="v0.41.0"
-  curl -fsSL "https://github.com/jj-vcs/jj/releases/download/${JJ_VERSION}/jj-${JJ_VERSION}-${JJ_ARCH}.tar.gz" \
-    | tar -xz -C "$HOME/.local/bin" ./jj
-  chmod +x "$HOME/.local/bin/jj"
+	echo "→ installing jj"
+	case "$(uname -m)" in
+	x86_64) JJ_ARCH="x86_64-unknown-linux-musl" ;;
+	aarch64 | arm64) JJ_ARCH="aarch64-unknown-linux-musl" ;;
+	*)
+		echo "Unsupported arch $(uname -m) for jj" >&2
+		exit 1
+		;;
+	esac
+	JJ_VERSION="v0.41.0"
+	curl -fsSL "https://github.com/jj-vcs/jj/releases/download/${JJ_VERSION}/jj-${JJ_VERSION}-${JJ_ARCH}.tar.gz" |
+		tar -xz -C "$HOME/.local/bin" ./jj
+	chmod +x "$HOME/.local/bin/jj"
 fi
 
 # --- Install rustup / cargo (caches live on $XDG_CACHE_HOME) ---
@@ -134,25 +150,25 @@ export PATH="$CARGO_HOME/bin:$PATH"
 relocate_to_cache "$HOME/.rustup" "$RUSTUP_HOME"
 relocate_to_cache "$HOME/.cargo" "$CARGO_HOME"
 if ! command -v rustup >/dev/null 2>&1; then
-  echo "→ installing rustup"
-  # --no-modify-path: don't touch .zshenv/.profile; the managed block in .zshrc
-  # owns PATH and sources $CARGO_HOME/env (which lives on /cache, not $HOME).
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain stable
+	echo "→ installing rustup"
+	# --no-modify-path: don't touch .zshenv/.profile; the managed block in .zshrc
+	# owns PATH and sources $CARGO_HOME/env (which lives on /cache, not $HOME).
+	curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain stable
 fi
 # Older runs (before --no-modify-path) left a `. "$HOME/.cargo/env"` line in
 # .zshenv; that path doesn't exist when CARGO_HOME=/cache/.cargo, so new shells
 # error on startup. Strip any cargo-env sourcing — the managed .zshrc block
 # handles it.
 if [ -f "$HOME/.zshenv" ] && grep -q '\.cargo/env' "$HOME/.zshenv"; then
-  echo "→ removing stale cargo env sourcing from ~/.zshenv"
-  sed -i.bak '/\.cargo\/env/d' "$HOME/.zshenv"
-  [ -s "$HOME/.zshenv" ] || rm -f "$HOME/.zshenv"
+	echo "→ removing stale cargo env sourcing from ~/.zshenv"
+	sed -i.bak '/\.cargo\/env/d' "$HOME/.zshenv"
+	[ -s "$HOME/.zshenv" ] || rm -f "$HOME/.zshenv"
 fi
 # Devboxes sometimes ship with rustup present but no toolchain (or the previous
 # toolchain lived on a mount that got wiped).
 if ! rustup default >/dev/null 2>&1; then
-  echo "→ installing rust stable toolchain"
-  rustup default stable
+	echo "→ installing rust stable toolchain"
+	rustup default stable
 fi
 
 # --- Route Go caches onto /cache ---
@@ -172,11 +188,11 @@ relocate_to_cache "$HOME/go" "$GOPATH"
 # --- Install nvm + Node LTS ---
 export NVM_DIR="$XDG_CACHE_HOME/.nvm"
 if [ -s "$NVM_DIR/nvm.sh" ]; then
-  echo "✓ nvm already installed"
+	echo "✓ nvm already installed"
 else
-  echo "→ installing nvm"
-  mkdir -p "$NVM_DIR"
-  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash
+	echo "→ installing nvm"
+	mkdir -p "$NVM_DIR"
+	curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash
 fi
 # shellcheck disable=SC1091
 . "$NVM_DIR/nvm.sh"
@@ -192,10 +208,12 @@ corepack enable
 export PNPM_HOME="$HOME/.local/share/pnpm"
 mkdir -p "$PNPM_HOME"
 case ":$PATH:" in
-  *":$PNPM_HOME:"*) ;;
-  *) export PATH="$PNPM_HOME:$PATH" ;;
+*":$PNPM_HOME:"*) ;;
+*) export PATH="$PNPM_HOME:$PATH" ;;
 esac
-SHELL="$ZSH_PATH" pnpm setup --force >/dev/null || true
+if ! SHELL="$ZSH_PATH" pnpm setup --force >/dev/null 2>&1; then
+	echo "WARNING: pnpm setup --force failed (non-fatal, continuing)" >&2
+fi
 # Belt-and-suspenders: force pnpm's stored global-bin-dir to match PNPM_HOME,
 # in case a prior run recorded a different path.
 pnpm config set global-bin-dir "$PNPM_HOME" >/dev/null
@@ -222,67 +240,70 @@ relocate_to_cache "$HOME/.pulumi" "$PULUMI_HOME"
 # Versions land under ~/.local/share/claude, which is symlinked onto /cache
 # above. The installer's checksum check is occasionally flaky, so retry once.
 if command -v claude >/dev/null 2>&1; then
-  echo "✓ claude already installed ($(claude --version 2>/dev/null | head -n1))"
+	echo "✓ claude already installed ($(claude --version 2>/dev/null | head -n1))"
 else
-  echo "→ installing claude code"
-  curl -fsSL https://claude.ai/install.sh | bash \
-    || { echo "→ claude install failed, retrying"; curl -fsSL https://claude.ai/install.sh | bash; }
+	echo "→ installing claude code"
+	curl -fsSL https://claude.ai/install.sh | bash ||
+		{
+			echo "→ claude install failed, retrying"
+			curl -fsSL https://claude.ai/install.sh | bash
+		}
 fi
 
 # --- Install cursor CLI (cursor-agent, installs to ~/.local/bin) ---
 if command -v cursor-agent >/dev/null 2>&1; then
-  echo "✓ cursor-agent already installed ($(cursor-agent --version 2>/dev/null | head -n1))"
+	echo "✓ cursor-agent already installed ($(cursor-agent --version 2>/dev/null | head -n1))"
 else
-  echo "→ installing cursor-agent"
-  curl https://cursor.com/install -fsS | bash
+	echo "→ installing cursor-agent"
+	curl https://cursor.com/install -fsS | bash
 fi
 
 # --- Install pi.dev ---
 if command -v pi >/dev/null 2>&1; then
-  echo "✓ pi already installed ($(pi --version 2>/dev/null | head -n1))"
+	echo "✓ pi already installed ($(pi --version 2>/dev/null | head -n1))"
 else
-  echo "→ installing pi"
-  # The installer has no --yes flag; it goes interactive whenever it can open
-  # /dev/tty (true even under `curl | sh`). Run it under setsid so it has no
-  # controlling terminal — it then auto-installs without prompting, picking the
-  # npm global prefix (or ~/.local) on its own.
-  curl -fsSL https://pi.dev/install.sh | setsid sh
+	echo "→ installing pi"
+	# The installer has no --yes flag; it goes interactive whenever it can open
+	# /dev/tty (true even under `curl | sh`). Run it under setsid so it has no
+	# controlling terminal — it then auto-installs without prompting, picking the
+	# npm global prefix (or ~/.local) on its own.
+	curl -fsSL https://pi.dev/install.sh | setsid sh
 fi
 
 # --- Install trunk ---
 if command -v trunk >/dev/null 2>&1; then
-  echo "✓ trunk already installed"
+	echo "✓ trunk already installed"
 else
-  echo "→ installing trunk"
-  curl -fsSL https://get.trunk.io | bash -s -- -y
+	echo "→ installing trunk"
+	curl -fsSL https://get.trunk.io | bash -s -- -y
 fi
 trunk shellhooks install zsh
 
 # --- Install tailscale ---
 if command -v tailscale >/dev/null 2>&1; then
-  echo "✓ tailscale already installed ($(tailscale version | head -n1))"
+	echo "✓ tailscale already installed ($(tailscale version | head -n1))"
 else
-  echo "→ installing tailscale"
-  curl -fsSL https://tailscale.com/install.sh | sh
+	echo "→ installing tailscale"
+	curl -fsSL https://tailscale.com/install.sh | sh
 fi
 # On distros tailscale's installer doesn't recognize, it drops the static
 # binaries (into /usr/local/sbin) but never installs a systemd unit — so
 # `systemctl restart tailscaled` fails with "Unit tailscaled.service not found".
 # Install the unit ourselves when it's missing, pointing at wherever tailscaled
 # actually landed.
-if ! systemctl list-unit-files tailscaled.service >/dev/null 2>&1 \
-   || ! systemctl cat tailscaled.service >/dev/null 2>&1; then
-  echo "→ installing tailscaled systemd unit"
-  TAILSCALED_BIN="$(command -v tailscaled || echo /usr/local/sbin/tailscaled)"
-  if [ ! -f /etc/default/tailscaled ]; then
-    sudo tee /etc/default/tailscaled >/dev/null <<'EOF'
+if ! systemctl list-unit-files tailscaled.service >/dev/null 2>&1 ||
+	! systemctl cat tailscaled.service >/dev/null 2>&1; then
+	echo "→ installing tailscaled systemd unit"
+	TAILSCALED_BIN="$(command -v tailscaled || echo /usr/local/sbin/tailscaled)"
+	if [ ! -f /etc/default/tailscaled ]; then
+		sudo tee /etc/default/tailscaled >/dev/null <<'EOF'
 # Set the port to listen on for incoming VPN packets.
 PORT="41641"
 # Extra flags you might want to pass to tailscaled.
 FLAGS=""
 EOF
-  fi
-  sudo tee /etc/systemd/system/tailscaled.service >/dev/null <<EOF
+	fi
+	sudo tee /etc/systemd/system/tailscaled.service >/dev/null <<EOF
 [Unit]
 Description=Tailscale node agent
 Documentation=https://tailscale.com/kb/
@@ -308,16 +329,16 @@ Type=notify
 [Install]
 WantedBy=multi-user.target
 EOF
-  sudo systemctl daemon-reload
-  sudo systemctl enable tailscaled
+	sudo systemctl daemon-reload
+	sudo systemctl enable tailscaled
 fi
 sudo systemctl restart tailscaled
 # `tailscale up` is skipped by default (the node is usually already authed).
 # Set TAILSCALE_UP=1 to bring the node up as part of setup.
-if [ -n "${TAILSCALE_UP:-}" ]; then
-  sudo tailscale up
+if [ -n "${TAILSCALE_UP-}" ]; then
+	sudo tailscale up
 else
-  echo "✓ skipping 'tailscale up' (set TAILSCALE_UP=1 to run it)"
+	echo "✓ skipping 'tailscale up' (set TAILSCALE_UP=1 to run it)"
 fi
 
 # --- Install nix (Determinate Systems installer, unattended) ---
@@ -325,11 +346,11 @@ fi
 # The installer writes /etc/profile.d/nix*.sh and the daemon profile under
 # /nix/var/nix/profiles/default — the managed .zshrc block sources the latter.
 if command -v nix >/dev/null 2>&1 || [ -e /nix/var/nix/profiles/default/bin/nix ]; then
-  echo "✓ nix already installed"
+	echo "✓ nix already installed"
 else
-  echo "→ installing nix"
-  curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
-    | sh -s -- install --no-confirm
+	echo "→ installing nix"
+	curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix |
+		sh -s -- install --no-confirm
 fi
 
 # --- Configure ~/.zshenv: env that must be set BEFORE .zshrc (managed block) ---
@@ -344,10 +365,10 @@ touch "$ZSHENV"
 ENV_BEGIN="# >>> workspace-setup.sh env (managed) >>>"
 ENV_END="# <<< workspace-setup.sh env (managed) <<<"
 if grep -Fq "$ENV_BEGIN" "$ZSHENV"; then
-  sed -i.bak "\|$ENV_BEGIN|,\|$ENV_END|d" "$ZSHENV"
+	sed -i.bak "\|$ENV_BEGIN|,\|$ENV_END|d" "$ZSHENV"
 fi
 mkdir -p "$XDG_CACHE_HOME/zsh"
-cat >> "$ZSHENV" <<'EOF'
+cat >>"$ZSHENV" <<'EOF'
 # >>> workspace-setup.sh env (managed) >>>
 export XDG_CACHE_HOME="/cache"
 export ZSH_COMPDUMP="$XDG_CACHE_HOME/zsh/zcompdump"
@@ -360,12 +381,12 @@ touch "$ZSHRC"
 BEGIN_MARK="# >>> workspace-setup.sh (managed) >>>"
 END_MARK="# <<< workspace-setup.sh (managed) <<<"
 if grep -Fq "$BEGIN_MARK" "$ZSHRC"; then
-  echo "→ refreshing managed block in $ZSHRC"
-  sed -i.bak "\|$BEGIN_MARK|,\|$END_MARK|d" "$ZSHRC"
+	echo "→ refreshing managed block in $ZSHRC"
+	sed -i.bak "\|$BEGIN_MARK|,\|$END_MARK|d" "$ZSHRC"
 else
-  echo "→ adding managed block to $ZSHRC"
+	echo "→ adding managed block to $ZSHRC"
 fi
-cat >> "$ZSHRC" <<'EOF'
+cat >>"$ZSHRC" <<'EOF'
 # >>> workspace-setup.sh (managed) >>>
 export XDG_CACHE_HOME="/cache"
 export RUSTUP_HOME="$XDG_CACHE_HOME/.rustup"
@@ -424,14 +445,14 @@ cd "$WORKSPACE"
 
 # --- Clone repos (idempotent) ---
 for repo in "${REPOS[@]}"; do
-  if [ -d "$repo/.git" ]; then
-    echo "✓ $repo already cloned"
-  else
-    echo "→ cloning $repo (shallow, last month of history)"
-    git clone --recurse-submodules --shallow-submodules --shallow-since="1 month ago" "git@github.com:$ORG/$repo.git"
-  fi
-  # Always sync submodules — picks up new ones for repos cloned pre-flag.
-  git -C "$repo" submodule update --init --recursive
+	if [ -d "$repo/.git" ]; then
+		echo "✓ $repo already cloned"
+	else
+		echo "→ cloning $repo (shallow, last month of history)"
+		git clone --recurse-submodules --shallow-submodules --shallow-since="1 month ago" "git@github.com:$ORG/$repo.git"
+	fi
+	# Always sync submodules — picks up new ones for repos cloned pre-flag.
+	git -C "$repo" submodule update --init --recursive
 done
 
 echo "Done. Repos are in $WORKSPACE. Restart your shell (or log out/in) for zsh and PATH changes to take effect."

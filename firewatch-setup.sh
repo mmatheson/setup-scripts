@@ -249,6 +249,19 @@ else
   curl -fsSL https://pi.dev/install.sh | setsid sh
 fi
 
+# --- Install opencode (installs to ~/.opencode/bin) ---
+# The installer has no env var to relocate its bin dir — it always lands in
+# ~/.opencode/bin. It's non-interactive under `curl | bash`. Pass
+# --no-modify-path so it doesn't append its own (unmanaged) PATH line to
+# .zshrc; the managed block below owns PATH and adds ~/.opencode/bin there.
+export PATH="$HOME/.opencode/bin:$PATH"
+if command -v opencode >/dev/null 2>&1; then
+  echo "✓ opencode already installed ($(opencode --version 2>/dev/null | head -n1))"
+else
+  echo "→ installing opencode"
+  curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
+fi
+
 # --- Install trunk ---
 if command -v trunk >/dev/null 2>&1; then
   echo "✓ trunk already installed"
@@ -374,7 +387,7 @@ export CODEX_HOME="$XDG_CACHE_HOME/.codex"
 export NPM_CONFIG_CACHE="$XDG_CACHE_HOME/npm"
 export PULUMI_HOME="$XDG_CACHE_HOME/pulumi"
 
-export PATH="$HOME/.local/bin:$CARGO_HOME/bin:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$CARGO_HOME/bin:$PATH"
 [ -s "$CARGO_HOME/env" ] && . "$CARGO_HOME/env"
 
 export GOPATH="$XDG_CACHE_HOME/go"
